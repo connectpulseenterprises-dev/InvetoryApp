@@ -802,7 +802,7 @@ elif main_section == "🧩 Kits Management":
             cols_present = [c for c in display_cols if c in bom_df.columns]
             st.dataframe(bom_df[cols_present])
         else:
-        st.dataframe(bom_df)
+            st.dataframe(bom_df)
     elif sub == "Create Kits":
         st.subheader("Produce / Assemble Kits (consume raw materials)")
         bom_df = read_table("kits_bom")
