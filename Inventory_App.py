@@ -676,7 +676,7 @@ elif main_section == "📦 Inventory Management":
                 qty_per_pack = st.number_input("Qty per Pack", min_value=0, step=1, value=0)
                 cost_per_pack = st.number_input("Cost per Pack (₹)", min_value=0.0, step=0.01, value=0.0)
             pieces = int(packs * qty_per_pack)
-            price_per_piece = float((cost_per_pack / ((packs * qty_per_pack)) if qty_per_pack > 0 else 0.0)
+            price_per_piece = float((cost_per_pack / (packs * qty_per_pack)) if qty_per_pack > 0 else 0.0)
             st.markdown(f"**Pieces (computed):** {pieces} — **Price per piece:** ₹{price_per_piece:.4f}")
             if st.button("Add Purchase (new material)"):
                 if not new_id:
