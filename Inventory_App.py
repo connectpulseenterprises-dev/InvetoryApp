@@ -67,7 +67,8 @@ DEFAULTS = {
         "Cost Per Pack", "Pieces", "Price Per Piece"
     ]),
     "kits_bom": pd.DataFrame(columns=[
-        "Kit ID", "Kit Name", "Material ID", "Material Name", "Qty Per Kit", "Unit Price Ref"
+    "Kit ID", "Kit Name", "Material ID", "Material Name", "Qty Per Kit", "Unit Price Ref",
+    "Amazon ID", "Meesho ID", "Flipkart ID"
     ]),
     "created_kits": pd.DataFrame(columns=["Date", "Kit ID", "Kit Name", "Qty", "Notes"]),
     "sold_kits": pd.DataFrame(columns=[
@@ -99,13 +100,16 @@ def init_db():
         price_per_piece NUMERIC
     );
     CREATE TABLE IF NOT EXISTS kits_bom (
-        id SERIAL PRIMARY KEY,
-        kit_id TEXT,
-        kit_name TEXT,
-        material_id TEXT,
-        material_name TEXT,
-        qty_per_kit NUMERIC,
-        unit_price_ref NUMERIC
+    id SERIAL PRIMARY KEY,
+    kit_id TEXT,
+    kit_name TEXT,
+    material_id TEXT,
+    material_name TEXT,
+    qty_per_kit NUMERIC,
+    unit_price_ref NUMERIC,
+    amazon_id TEXT,
+    meesho_id TEXT,
+    flipkart_id TEXT
     );
     CREATE TABLE IF NOT EXISTS created_kits (
         id SERIAL PRIMARY KEY,
@@ -763,27 +767,42 @@ elif main_section == "🧩 Kits Management":
         col1, col2, col3 = st.columns(3)
         with col1:
             material_id = st.text_input("Material ID")
+            amazon_id = st.text_input("Amazon ID (optional)")
         with col2:
             qty_per = st.number_input("Qty Per Kit (pieces)", min_value=0.0, step=1.0, value=1.0)
+            meesho_id = st.text_input("Meesho ID (optional)")
         with col3:
             unit_override = st.number_input("Unit Price Override (₹) (optional)", min_value=0.0, step=0.01, value=0.0)
+            flipkart_id = st.text_input("Flipkart ID (optional)")
+
         if st.button("Add BOM Row"):
             if not kit_id_input or not kit_name_input or not material_id or qty_per <= 0:
                 st.error("Provide Kit ID, Kit Name, Material, and qty > 0.")
             else:
-                row = {
+               row = {
                     "kit_id": kit_id_input.strip(),
                     "kit_name": kit_name_input.strip(),
                     "material_id": material_id,
-                    "material_name": "",
-                    "qty_per_kit": float(qty_per),
-                    "unit_price_ref": float(unit_override) if unit_override > 0 else None
-                }
+                    "material_name": get_material_name(master_snapshot if not master_snapshot.empty else DEFAULTS["master"], material_id),
+                    "qty_per_kit": qty_per,
+                    "unit_price_ref": float(unit_override) if unit_override > 0 else None,
+                    "amazon_id": amazon_id.strip() if amazon_id else None,
+                    "meesho_id": meesho_id.strip() if meesho_id else None,
+                    "flipkart_id": flipkart_id.strip() if flipkart_id else None
+                    }
                 write_rows("kits_bom", pd.DataFrame([row]))
                 st.success(f"Added BOM row for {kit_id_input} ({kit_name_input}).")
         st.markdown("---")
         st.subheader("Current BOM")
-        st.dataframe(read_table("kits_bom"))
+        bom_df = read_table("kits_bom")
+        if not bom_df.empty:
+            # re-order columns for display (preferred)
+            display_cols = ["kit_id","kit_name","material_id","material_name","qty_per_kit","unit_price_ref","amazon_id","meesho_id","flipkart_id"]
+            # fallback mapping if old-case columns present
+            cols_present = [c for c in display_cols if c in bom_df.columns]
+            st.dataframe(bom_df[cols_present])
+        else:
+        st.dataframe(bom_df)
     elif sub == "Create Kits":
         st.subheader("Produce / Assemble Kits (consume raw materials)")
         bom_df = read_table("kits_bom")
