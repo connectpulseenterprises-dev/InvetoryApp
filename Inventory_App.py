@@ -779,7 +779,7 @@ elif main_section == "🧩 Kits Management":
             if not kit_id_input or not kit_name_input or not material_id or qty_per <= 0:
                 st.error("Provide Kit ID, Kit Name, Material, and qty > 0.")
             else:
-               row = {
+                row = {
                     "kit_id": kit_id_input.strip(),
                     "kit_name": kit_name_input.strip(),
                     "material_id": material_id,
@@ -789,7 +789,7 @@ elif main_section == "🧩 Kits Management":
                     "amazon_id": amazon_id.strip() if amazon_id else None,
                     "meesho_id": meesho_id.strip() if meesho_id else None,
                     "flipkart_id": flipkart_id.strip() if flipkart_id else None
-                    }
+                }
                 write_rows("kits_bom", pd.DataFrame([row]))
                 st.success(f"Added BOM row for {kit_id_input} ({kit_name_input}).")
         st.markdown("---")
