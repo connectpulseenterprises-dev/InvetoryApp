@@ -1061,30 +1061,172 @@ elif main_section == "⬇️ Data":
         except Exception as e:
             st.error(f"Failed to import: {e}")
     st.markdown("---")
-    st.subheader("Admin: Manage Data (view / delete rows)")
+# ---------------- Admin: Manage Data (view / edit / delete rows) ----------------
+    st.subheader("Admin: Manage Data (view / edit / delete rows)")
+    
+    # Fetch table list from DB
     try:
         insp = inspect(engine)
         all_tables = insp.get_table_names(schema="public")
     except Exception:
         all_tables = list(DEFAULTS.keys()) + ["sold_kits", "master", "raw_uploads"]
+    
     known = ["purchases","kits_bom","created_kits","sold_kits","defective","restock","master","raw_uploads"]
     ordered = [t for t in known if t in all_tables] + [t for t in all_tables if t not in known]
+    
     sel_table = st.selectbox("Choose table to manage", ordered)
-    if sel_table:
-        df_view = read_table(sel_table)
-        if df_view.empty:
-            st.info("No rows in table.")
+    if not sel_table:
+        st.info("Pick a table to manage.")
+    else:
+        # Pagination controls
+        PAGE_SIZE = st.number_input("Rows per page", min_value=10, max_value=500, value=50, step=10, key=f"page_size_{sel_table}")
+        # Whether to include deleted rows (if you implemented deleted_at)
+        include_deleted = st.checkbox("Include deleted rows (if applicable)", value=False, key=f"include_deleted_{sel_table}")
+    
+        df_all = read_table(sel_table)
+        if df_all.empty:
+            st.info("No rows available in this table.")
         else:
-            st.write(f"Showing up to 200 rows from `{sel_table}`")
-            st.dataframe(df_view.head(200))
-            pk = get_primary_key_column(sel_table)
-            st.write(f"Detected primary key: **{pk}**")
-            options = df_view[pk].astype(str).tolist()
-            to_delete = st.multiselect("Select rows (by PK) to delete", options=options)
+            # Filter out soft-deleted rows if column exists and unchecked
+            if "deleted_at" in df_all.columns and not include_deleted:
+                try:
+                    df_all = df_all[df_all["deleted_at"].isna()]
+                except Exception:
+                    # fallback: filter null/empty strings
+                    df_all = df_all[df_all["deleted_at"].isnull() | (df_all["deleted_at"] == "")]
+    
+            total_rows = len(df_all)
+            total_pages = (total_rows + PAGE_SIZE - 1) // PAGE_SIZE if total_rows > 0 else 1
+            # session_state page
+            page_key = f"manage_page_{sel_table}"
+            if page_key not in st.session_state:
+                st.session_state[page_key] = 1
+            colp1, colp2, colp3 = st.columns([1,2,1])
+            with colp1:
+                if st.button("Prev", key=f"prev_{sel_table}"):
+                    st.session_state[page_key] = max(1, st.session_state[page_key] - 1)
+            with colp3:
+                if st.button("Next", key=f"next_{sel_table}"):
+                    st.session_state[page_key] = min(total_pages if total_pages>0 else 1, st.session_state[page_key] + 1)
+            page = st.session_state[page_key]
+            start = (page - 1) * PAGE_SIZE
+            end = start + PAGE_SIZE
+            st.write(f"Showing page {page} / {total_pages} — rows {start+1} to {min(end, total_rows)} of {total_rows}")
+    
+            # Show page rows
+            df_page = df_all.iloc[start:end].copy()
+            st.dataframe(df_page)
+    
+            # Primary key detection
+            pk_col = get_primary_key_column(sel_table)
+            st.write(f"Detected primary key: **{pk_col}**")
+    
+            # Edit: choose one row (by pk) to edit from current page
+            editable_options = df_page[pk_col].astype(str).tolist()
+            selected_pk = st.selectbox("Select row to edit (by PK) from this page", options=[""] + editable_options, key=f"edit_select_{sel_table}")
+    
+            def update_row_by_pk(table_name: str, pk_col_name: str, pk_val, updates: dict) -> int:
+                """
+                updates: dict of column -> new value
+                Returns number of rows updated (should be 1 or 0)
+                """
+                if not updates:
+                    return 0
+                # Build parameterized update SQL
+                set_parts = []
+                params = {}
+                for i, (col, val) in enumerate(updates.items()):
+                    param_name = f"p{i}"
+                    set_parts.append(f"{col} = :{param_name}")
+                    params[param_name] = val
+                params["pkval"] = pk_val
+                sql = text(f"UPDATE {table_name} SET {', '.join(set_parts)} WHERE {pk_col_name} = :pkval")
+                with engine.begin() as conn:
+                    res = conn.execute(sql, params)
+                # clear cache
+                try:
+                    read_table.clear()
+                except Exception:
+                    pass
+                return getattr(res, "rowcount", 0) or 0
+    
+            # Show editable fields in a form
+            if selected_pk:
+                # find the row record (from df_all to get full row)
+                try:
+                    # preserve original types
+                    row_idx = df_all[df_all[pk_col].astype(str) == str(selected_pk)].index
+                    if len(row_idx) == 0:
+                        st.error("Selected PK not found on this page (it may be on another page).")
+                    else:
+                        row_rec = df_all.loc[row_idx[0]].to_dict()
+                        st.markdown("### Edit row fields")
+                        edit_form = st.form(f"edit_form_{sel_table}_{selected_pk}")
+                        # For each column except pk, create a suitable input
+                        editable_cols = [c for c in df_all.columns if c != pk_col]
+                        updates = {}
+                        input_widgets = {}
+                        for col in editable_cols:
+                            val = row_rec.get(col, "")
+                            # choose widget by dtype / name heuristics
+                            if isinstance(val, (int,)) and "qty" in col.lower():
+                                input_widgets[col] = edit_form.number_input(label=f"{col}", value=int(val) if pd.notna(val) else 0, step=1)
+                            elif isinstance(val, (int,)) and col.lower().startswith("id"):
+                                # treat as text (some PKs are text)
+                                input_widgets[col] = edit_form.text_input(label=f"{col}", value=str(val) if pd.notna(val) else "")
+                            elif isinstance(val, float) or ("price" in col.lower() or "cost" in col.lower() or "amount" in col.lower()):
+                                # numeric
+                                try:
+                                    input_widgets[col] = edit_form.number_input(label=f"{col}", value=float(val) if pd.notna(val) else 0.0, format="%.6f")
+                                except Exception:
+                                    input_widgets[col] = edit_form.text_input(label=f"{col}", value=str(val) if pd.notna(val) else "")
+                            elif "date" in col.lower():
+                                # date input where possible
+                                try:
+                                    dt = pd.to_datetime(val, errors="coerce")
+                                    if pd.isna(dt):
+                                        input_widgets[col] = edit_form.text_input(label=f"{col}", value=str(val) if val is not None else "")
+                                    else:
+                                        input_widgets[col] = edit_form.date_input(label=f"{col}", value=dt.date())
+                                except Exception:
+                                    input_widgets[col] = edit_form.text_input(label=f"{col}", value=str(val) if val is not None else "")
+                            else:
+                                input_widgets[col] = edit_form.text_input(label=f"{col}", value=str(val) if val is not None else "")
+                        confirm = edit_form.checkbox("I confirm to update these fields", value=False)
+                        submit = edit_form.form_submit_button("Save updates")
+                        if submit:
+                            if not confirm:
+                                st.error("Please confirm updates before saving.")
+                            else:
+                                # prepare updates dict converting date inputs to strings
+                                for col, widget_val in input_widgets.items():
+                                    new_val = widget_val
+                                    # date to iso
+                                    if isinstance(new_val, date) and not isinstance(new_val, datetime):
+                                        new_val = new_val.strftime("%Y-%m-%d")
+                                    updates[col] = new_val
+                                # Remove values that didn't change (optional): we will update all provided values
+                                try:
+                                    updated_count = update_row_by_pk(sel_table, pk_col, row_rec[pk_col], updates)
+                                    if updated_count > 0:
+                                        st.success(f"Updated {updated_count} row(s) in `{sel_table}`.")
+                                    else:
+                                        st.warning("No rows updated (maybe values did not change).")
+                                    st.experimental_rerun()
+                                except Exception as e:
+                                    st.error(f"Failed to update row: {e}")
+                except Exception as e:
+                    st.error(f"Failed to prepare edit form: {e}")
+    
+            st.markdown("---")
+            # Delete UI (keeps your existing delete flow)
+            st.subheader("Delete rows (admin)")
+            options = df_page[pk_col].astype(str).tolist()
+            to_delete = st.multiselect("Select rows (by PK) to delete", options=options, key=f"del_multi_{sel_table}")
             if to_delete:
                 st.warning(f"Selected {len(to_delete)} row(s) for deletion.")
-                if st.checkbox("Confirm deletion? This action cannot be undone."):
-                    if st.button("Delete selected rows"):
+                if st.checkbox("Confirm deletion? This action cannot be undone.", key=f"del_confirm_{sel_table}"):
+                    if st.button("Delete selected rows", key=f"del_btn_{sel_table}"):
                         prepared = []
                         for v in to_delete:
                             try:
