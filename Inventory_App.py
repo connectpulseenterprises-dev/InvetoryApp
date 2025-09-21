@@ -1,17 +1,10 @@
-# inventory_app_supabase_full.py
+# inventory_app_full.py
 """
 Inventory & Kits Manager — Streamlit + Supabase/Postgres (full)
-Features:
-- Multi-level sidebar (Main section + subsections)
-- Persistent storage via Postgres (Supabase). DATABASE_URL must be in st.secrets
-  Prefer the Session Pooler URL (IPv4-compatible).
-- Table init, CRUD (append), CSV imports, snapshot recompute
-- Manage Data: view and delete rows by PK
-- Basic marketplace CSV parsers (Amazon / Flipkart / Meesho)
-Requirements:
-pip install streamlit pandas sqlalchemy psycopg2-binary python-dateutil
+- Requires: streamlit, pandas, sqlalchemy, psycopg2-binary, python-dateutil
+- Put DATABASE_URL (Session Pooler URL) in Streamlit secrets (URL-encode password)
 Run:
-streamlit run inventory_app_supabase_full.py
+streamlit run inventory_app_full.py
 """
 
 import io
@@ -25,56 +18,34 @@ import streamlit as st
 import pandas as pd
 from dateutil import parser as dateparser
 from sqlalchemy import create_engine, text, inspect
-from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import SQLAlchemyError
 
-# --------------- Page config ---------------
+# ---------------- Page config ----------------
 st.set_page_config(page_title="Inventory & Kits Manager", page_icon="📦", layout="wide")
 logger = logging.getLogger(__name__)
 
-# --------------- Secrets & DB engine ---------------
+# ---------------- Secrets & DB engine ----------------
 if "DATABASE_URL" not in st.secrets:
     st.error("DATABASE_URL missing in Streamlit secrets. Add Supabase Session Pooler URL (URL-encode password).")
     st.stop()
-
-raw_db_url = st.secrets["DATABASE_URL"]
 
 def ensure_sslmode(url: str) -> str:
     if "sslmode" in url.lower():
         return url
     return url + ("&sslmode=require" if "?" in url else "?sslmode=require")
 
+raw_db_url = st.secrets["DATABASE_URL"]
 DB_URL = ensure_sslmode(raw_db_url)
 
-def resolve_first_ipv4(hostname: str):
-    import socket
-    try:
-        infos = socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM)
-        if not infos:
-            return None
-        return infos[0][4][0]
-    except Exception:
-        return None
-
 def make_engine_with_pool(db_url: str, max_retries: int = 3):
-    """
-    Create SQLAlchemy engine with a small retry/backoff and pool_pre_ping.
-    For environments with IPv4 only, prefer Session Pooler URL in secrets (no IPv4 hack needed).
-    """
     last_exc = None
     for attempt in range(1, max_retries + 1):
         try:
-            eng = create_engine(
-                db_url,
-                pool_size=3,
-                max_overflow=6,
-                pool_pre_ping=True,
-                future=True
-            )
-            # smoke test
+            eng = create_engine(db_url, pool_size=3, max_overflow=6, pool_pre_ping=True, future=True)
+            # quick smoke test
             with eng.connect() as conn:
                 conn.execute(text("SELECT 1"))
-            logger.info("DB connection successful on attempt %s", attempt)
+            logger.info("DB connected on attempt %s", attempt)
             return eng
         except Exception as e:
             last_exc = e
@@ -85,11 +56,11 @@ def make_engine_with_pool(db_url: str, max_retries: int = 3):
 try:
     engine = make_engine_with_pool(DB_URL, max_retries=4)
 except Exception as e:
-    logger.exception("Failed to connect to DB during startup")
-    st.error("Failed to connect to database. Check DATABASE_URL in st.secrets and Supabase project. See logs for details.")
+    logger.exception("Failed to connect to DB")
+    st.error("Failed to connect to database. Check DATABASE_URL in st.secrets and Supabase project. See logs.")
     st.stop()
 
-# --------------- Default templates ---------------
+# ---------------- Default templates ----------------
 DEFAULTS = {
     "purchases": pd.DataFrame(columns=[
         "Date", "Material ID", "Material Name", "Vendor", "Packs", "Qty Per Pack",
@@ -112,7 +83,7 @@ DEFAULTS = {
     "raw_uploads": pd.DataFrame(columns=["uploaded_at", "filename", "platform", "storage_path", "rows", "notes"])
 }
 
-# --------------- DB initialization ---------------
+# ---------------- DB init ----------------
 def init_db():
     ddl = """
     CREATE TABLE IF NOT EXISTS purchases (
@@ -195,7 +166,6 @@ def init_db():
     with engine.begin() as conn:
         conn.execute(text(ddl))
 
-# run init
 try:
     init_db()
 except Exception as e:
@@ -203,12 +173,10 @@ except Exception as e:
     st.error("Database initialization failed. See logs.")
     st.stop()
 
-# --------------- DB helpers (cached reads/writes) ---------------
+# ---------------- Cached reads / writes ----------------
 @st.cache_data(ttl=60, show_spinner=False)
 def read_table(name: str) -> pd.DataFrame:
-    """Read entire table into dataframe; returns DEFAULT if empty."""
     try:
-        # special case: master (id is text PK)
         q = f"SELECT * FROM {name} ORDER BY id NULLS LAST"
         df = pd.read_sql(q, engine)
         if df.empty:
@@ -224,39 +192,6 @@ def read_table(name: str) -> pd.DataFrame:
             logger.exception("read_table failed for %s: %s", name, e)
             return DEFAULTS.get(name, pd.DataFrame()).copy()
 
-def write_rows(name: str, df: pd.DataFrame):
-    """Append rows to table; clears cache."""
-    if df is None or df.empty:
-        return
-    try:
-        # pandas to_sql append
-        df.to_sql(name, engine, if_exists="append", index=False, method="multi", chunksize=250)
-    except Exception as e:
-        logger.exception("to_sql append failed, falling back to single inserts: %s", e)
-        with engine.begin() as conn:
-            for r in df.fillna("").to_dict(orient="records"):
-                keys = ", ".join(r.keys())
-                vals = ", ".join([f":{k}" for k in r.keys()])
-                stmt = text(f"INSERT INTO {name} ({keys}) VALUES ({vals})")
-                conn.execute(stmt, r)
-    # clear cache
-    try:
-        read_table.clear()
-    except Exception:
-        pass
-
-def overwrite_table(name: str, df: pd.DataFrame):
-    """Delete all rows and insert df (used for master snapshot)."""
-    with engine.begin() as conn:
-        conn.execute(text(f"DELETE FROM {name}"))
-    if df is not None and not df.empty:
-        write_rows(name, df)
-    try:
-        read_table.clear()
-    except Exception:
-        pass
-
-# --------------- Utility helpers ---------------
 def _safe_float(x):
     try:
         if x in (None, ""):
@@ -265,12 +200,115 @@ def _safe_float(x):
     except Exception:
         return 0.0
 
-def ensure_numeric(df, cols):
-    for c in cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+# ---------------- Normalize purchases (auto compute pieces & price_per_piece) ----------------
+def normalize_purchases_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    w = df.copy()
+    # map common header variants
+    col_map = {}
+    for c in w.columns:
+        lc = c.strip().lower()
+        if lc in ("date", "purchase_date", "order_date"):
+            col_map[c] = "date"
+        elif lc in ("material id", "material_id", "materialid", "id"):
+            col_map[c] = "material_id"
+        elif lc in ("material name", "material_name", "name"):
+            col_map[c] = "material_name"
+        elif lc in ("vendor", "supplier"):
+            col_map[c] = "vendor"
+        elif lc in ("packs", "pack_count"):
+            col_map[c] = "packs"
+        elif lc in ("qty per pack", "qty_per_pack", "qtyperpack", "qty_per"):
+            col_map[c] = "qty_per_pack"
+        elif lc in ("cost per pack", "cost_per_pack", "costperpack", "cost"):
+            col_map[c] = "cost_per_pack"
+        elif lc in ("pieces", "pcs", "piece_count"):
+            col_map[c] = "pieces"
+        elif lc in ("price per piece", "price_per_piece", "ppp"):
+            col_map[c] = "price_per_piece"
+    w = w.rename(columns=col_map)
+    # ensure numeric columns exist
+    for n in ["packs", "qty_per_pack", "cost_per_pack", "pieces", "price_per_piece"]:
+        if n not in w.columns:
+            w[n] = None
+    # coerce types
+    w["packs"] = pd.to_numeric(w["packs"], errors="coerce").fillna(0).astype(int)
+    w["qty_per_pack"] = pd.to_numeric(w["qty_per_pack"], errors="coerce").fillna(0).astype(int)
+    w["cost_per_pack"] = pd.to_numeric(w["cost_per_pack"], errors="coerce").fillna(0.0)
+    # compute pieces
+    def compute_pieces(row):
+        pieces = row.get("pieces")
+        try:
+            if pieces is None or (pd.notna(pieces) and float(pieces) == 0):
+                return int(row["packs"] * row["qty_per_pack"])
+            return int(float(pieces))
+        except Exception:
+            return int(row["packs"] * row["qty_per_pack"])
+    w["pieces"] = w.apply(compute_pieces, axis=1)
+    # compute price per piece
+    def compute_ppp(row):
+        ppp = row.get("price_per_piece")
+        try:
+            if ppp is None or (pd.notna(ppp) and float(ppp) == 0):
+                if row["qty_per_pack"] > 0:
+                    return round(float(row["cost_per_pack"]) / float(row["qty_per_pack"]), 6)
+                return 0.0
+            return float(ppp)
+        except Exception:
+            if row["qty_per_pack"] > 0:
+                return round(float(row["cost_per_pack"]) / float(row["qty_per_pack"]), 6)
+            return 0.0
+    w["price_per_piece"] = w.apply(compute_ppp, axis=1)
+    # normalize date strings
+    if "date" in w.columns:
+        try:
+            w["date"] = pd.to_datetime(w["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    final_cols = ["date", "material_id", "material_name", "vendor", "packs", "qty_per_pack", "cost_per_pack", "pieces", "price_per_piece"]
+    for c in final_cols:
+        if c not in w.columns:
+            w[c] = None
+    return w[final_cols]
 
-# --------------- Snapshot logic (avg-cost) ---------------
+# ---------------- Write helpers ----------------
+def write_rows(name: str, df: pd.DataFrame):
+    if df is None or df.empty:
+        return
+    target_df = df.copy()
+    if name == "purchases":
+        target_df = normalize_purchases_df(target_df)
+    try:
+        # Use to_sql append
+        target_df.to_sql(name, engine, if_exists="append", index=False, method="multi", chunksize=250)
+    except Exception as e:
+        logger.exception("to_sql append failed, fallback single inserts: %s", e)
+        with engine.begin() as conn:
+            for r in target_df.fillna("").to_dict(orient="records"):
+                keys = ", ".join(r.keys())
+                vals = ", ".join([f":{k}" for k in r.keys()])
+                stmt = text(f"INSERT INTO {name} ({keys}) VALUES ({vals})")
+                conn.execute(stmt, r)
+    try:
+        read_table.clear()
+    except Exception:
+        pass
+
+def overwrite_table(name: str, df: pd.DataFrame):
+    with engine.begin() as conn:
+        conn.execute(text(f"DELETE FROM {name}"))
+    if df is not None and not df.empty:
+        to_insert = df.copy()
+        if name == "purchases":
+            to_insert = normalize_purchases_df(to_insert)
+        write_rows(name, to_insert)
+    try:
+        read_table.clear()
+    except Exception:
+        pass
+
+# ---------------- Snapshot logic ----------------
 def build_material_events(purchases: pd.DataFrame,
                           created_kits: pd.DataFrame,
                           defective: pd.DataFrame,
@@ -385,7 +423,6 @@ def recompute_master_snapshot_and_save():
     bom = read_table("kits_bom")
     events = build_material_events(purchases, created, defective, bom)
     snapshot = compute_snapshot_from_events(events)
-    # write snapshot to master table (id as text PK)
     if not snapshot.empty:
         df = snapshot.rename(columns={"ID": "id", "Name": "name", "Vendor": "vendor", "Available Pieces": "available_pieces", "Current Price Per Piece": "current_price_per_piece", "Total Value": "total_value", "Total Purchased": "total_purchased", "Total Consumed": "total_consumed"})
         overwrite_table("master", df)
@@ -393,7 +430,7 @@ def recompute_master_snapshot_and_save():
         overwrite_table("master", pd.DataFrame())
     return snapshot
 
-# --------------- Parsers for marketplace CSVs ---------------
+# ---------------- Parsers (marketplace CSV) ----------------
 def normalize_header(h: str) -> str:
     return str(h or "").strip().lower().replace(" ", "_")
 
@@ -451,7 +488,7 @@ def parse_meesho(df_raw: pd.DataFrame) -> pd.DataFrame:
         parsed["Platform"] = "Meesho"
     return parsed
 
-# --------------- Admin helpers: PK detection & deletion ---------------
+# ---------------- Admin helpers: PK & delete ----------------
 def get_primary_key_column(table_name: str) -> str:
     try:
         insp = inspect(engine)
@@ -466,7 +503,6 @@ def delete_rows_by_pk(table_name: str, pk_values: List):
     if not pk_values:
         return 0
     pk_col = get_primary_key_column(table_name)
-    # Prepare parameterized placeholders
     params = {f"v{i}": v for i, v in enumerate(pk_values)}
     placeholders = ", ".join([f":v{i}" for i in range(len(pk_values))])
     sql = text(f"DELETE FROM {table_name} WHERE {pk_col} IN ({placeholders})")
@@ -478,11 +514,11 @@ def delete_rows_by_pk(table_name: str, pk_values: List):
         pass
     return len(pk_values)
 
-# --------------- UI: Sidebar & Navigation (multi-level) ---------------
+# ---------------- UI: Navigation ----------------
 MAIN_SECTIONS = ["📊 Dashboards", "📦 Inventory Management", "🧩 Kits Management", "🧾 Sales", "⬇️ Data"]
 main_section = st.sidebar.selectbox("Section", MAIN_SECTIONS)
 
-# ---------------- DASHBOARDS ----------------
+# ---------------- Dashboards ----------------
 if main_section == "📊 Dashboards":
     dash_choice = st.sidebar.radio("Choose Dashboard", ["📦 Inventory Dashboard", "💰 Sales Dashboard"])
     if dash_choice == "📦 Inventory Dashboard":
@@ -491,7 +527,6 @@ if main_section == "📊 Dashboards":
         total_materials = len(master_snapshot) if not master_snapshot.empty else 0
         total_pieces = int(master_snapshot["available_pieces"].sum()) if not master_snapshot.empty and "available_pieces" in master_snapshot.columns else (int(master_snapshot["Available Pieces"].sum()) if not master_snapshot.empty and "Available Pieces" in master_snapshot.columns else 0)
         inventory_value = float(master_snapshot["total_value"].sum()) if not master_snapshot.empty and "total_value" in master_snapshot.columns else (float(master_snapshot["Total Value"].sum()) if not master_snapshot.empty and "Total Value" in master_snapshot.columns else 0.0)
-        total_kit_types = 0
         try:
             bom_df = read_table("kits_bom")
             total_kit_types = bom_df["kit_id"].nunique() if not bom_df.empty and "kit_id" in bom_df.columns else bom_df["Kit ID"].nunique() if not bom_df.empty and "Kit ID" in bom_df.columns else 0
@@ -507,7 +542,6 @@ if main_section == "📊 Dashboards":
         with st.expander("View full inventory snapshot"):
             st.dataframe(master_snapshot)
     else:
-        # Sales dashboard
         st.title("💰 Sales Dashboard")
         sold_df = read_table("sold_kits")
         if sold_df.empty:
@@ -541,7 +575,8 @@ if main_section == "📊 Dashboards":
                 else:
                     mask &= sold_local["Kit Name"].isin(kit_filter)
             sold_filtered = sold_local.loc[mask]
-            ensure_numeric(sold_filtered, ["amount_received","cost_price","profit","qty","Amount Received","Cost Price","Profit","Qty"])
+            ensure_cols = ["amount_received","cost_price","profit","qty","Amount Received","Cost Price","Profit","Qty"]
+            ensure_numeric(sold_filtered, ensure_cols)
             rev = float(sold_filtered["amount_received"].sum()) if "amount_received" in sold_filtered.columns else float(sold_filtered["Amount Received"].sum()) if "Amount Received" in sold_filtered.columns else 0.0
             cost = float(sold_filtered["cost_price"].sum()) if "cost_price" in sold_filtered.columns else float(sold_filtered["Cost Price"].sum()) if "Cost Price" in sold_filtered.columns else 0.0
             prof = float(sold_filtered["profit"].sum()) if "profit" in sold_filtered.columns else float(sold_filtered["Profit"].sum()) if "Profit" in sold_filtered.columns else 0.0
@@ -578,10 +613,10 @@ if main_section == "📊 Dashboards":
                 st.subheader("Filtered Sales Table")
                 st.dataframe(sold_filtered.sort_values("Date_dt", ascending=False))
 
-# ---------------- INVENTORY MANAGEMENT ----------------
+# ---------------- Inventory Management ----------------
 elif main_section == "📦 Inventory Management":
-    sub = st.sidebar.radio("Inventory", ["Master Inventory (Purchases)", "Restock Planner", "Defective Items", "Purchase History"])
     st.title("📦 Inventory Management")
+    sub = st.sidebar.radio("Inventory", ["Master Inventory (Purchases)", "Restock Planner", "Defective Items", "Purchase History"])
     if sub == "Master Inventory (Purchases)":
         st.subheader("Add Purchase (new or existing material)")
         purchases_df = read_table("purchases")
@@ -623,7 +658,7 @@ elif main_section == "📦 Inventory Management":
                         "qty_per_pack": int(qty_per_pack),
                         "cost_per_pack": float(cost_per_pack),
                         "pieces": pieces,
-                        "price_per_piece": float(price_per_piece)
+                        "price_per_piece": price_per_piece
                     }
                     write_rows("purchases", pd.DataFrame([row]))
                     recompute_master_snapshot_and_save()
@@ -647,7 +682,6 @@ elif main_section == "📦 Inventory Management":
                 if not new_id:
                     st.error("Material ID required.")
                 else:
-                    # check exists
                     purchases_df = read_table("purchases")
                     master_snapshot = read_table("master")
                     exists = ((purchases_df.get("material_id", pd.Series()) == new_id).any()) or ((master_snapshot.get("id", pd.Series()) == new_id).any())
@@ -663,7 +697,7 @@ elif main_section == "📦 Inventory Management":
                             "qty_per_pack": int(qty_per_pack),
                             "cost_per_pack": float(cost_per_pack),
                             "pieces": pieces,
-                            "price_per_piece": float(price_per_piece)
+                            "price_per_piece": price_per_piece
                         }
                         write_rows("purchases", pd.DataFrame([row]))
                         recompute_master_snapshot_and_save()
@@ -717,7 +751,7 @@ elif main_section == "📦 Inventory Management":
         view = view.sort_values("date", ascending=False) if "date" in view.columns else view
         st.dataframe(view)
 
-# ---------------- KITS MANAGEMENT ----------------
+# ---------------- Kits Management ----------------
 elif main_section == "🧩 Kits Management":
     st.title("🧩 Kits Management")
     sub = st.sidebar.radio("Kits", ["BOM (Kit components)", "Create Kits", "Kits Inventory"])
@@ -786,7 +820,6 @@ elif main_section == "🧩 Kits Management":
                 for m in msgs:
                     st.write("- ", m)
         if st.button("Produce Kits (Consume Raw Materials)"):
-            # perform feasibility check again
             snapshot = read_table("master")
             bom_df = read_table("kits_bom")
             ok = True
@@ -834,7 +867,7 @@ elif main_section == "🧩 Kits Management":
                 inv = inv.merge(names, on="kit_id", how="left")
         st.dataframe(inv if not inv.empty else pd.DataFrame([{"Status":"No kit data"}]))
 
-# ---------------- SALES ----------------
+# ---------------- Sales ----------------
 elif main_section == "🧾 Sales":
     st.title("🧾 Sales")
     sub = st.sidebar.radio("Sales", ["Record Sale", "Upload Marketplace CSV", "Sales Ledger"])
@@ -845,7 +878,6 @@ elif main_section == "🧾 Sales":
         notes = st.text_input("Notes (optional)")
         if uploaded is not None and st.button("Process Upload"):
             bt = uploaded.read()
-            # store raw metadata row
             write_rows("raw_uploads", pd.DataFrame([{"uploaded_at": datetime.utcnow(), "filename": uploaded.name, "platform": platform, "storage_path": None, "rows": 0, "notes": notes}]))
             try:
                 df_raw = pd.read_csv(io.BytesIO(bt))
@@ -863,13 +895,13 @@ elif main_section == "🧾 Sales":
             if df_norm.empty:
                 st.warning("No rows parsed from CSV.")
             else:
-                # compute cost price for each kit using the current snapshot
+                # compute cost price per kit using current snapshot
                 snapshot = read_table("master")
                 bom = read_table("kits_bom")
                 def kit_cost_from_snapshot(kit_id, qty):
                     if bom.empty or snapshot.empty or not kit_id:
                         return 0.0
-                    parts = bom[bom.get("kit_id","") == kit_id] if "kit_id" in bom.columns else bom[bom.get("Kit ID","") == kit_id]
+                    parts = bom[bom.get("kit_id","") == kit_id] if "kit_id" in bom.columns else bom[bom.get("Kit ID","") == kit_id] if "Kit ID" in bom.columns else pd.DataFrame()
                     total = 0.0
                     for _, pr in parts.iterrows():
                         mid = pr.get("material_id") or pr.get("Material ID")
@@ -917,7 +949,6 @@ elif main_section == "🧾 Sales":
         notes = st.text_input("Notes (optional)")
         sale_date = st.date_input("Sale date", value=date.today())
         if st.button("Save Sale"):
-            # compute cost
             snapshot = read_table("master")
             bom = read_table("kits_bom")
             cost_total = 0.0
@@ -951,11 +982,10 @@ elif main_section == "🧾 Sales":
         st.subheader("Sales Ledger")
         st.dataframe(read_table("sold_kits").sort_values("date", ascending=False) if not read_table("sold_kits").empty else pd.DataFrame([{"Status":"No sales"}]))
 
-# ---------------- DATA / ADMIN ----------------
+# ---------------- Data / Admin ----------------
 elif main_section == "⬇️ Data":
     st.title("⬇️ Import / ⬆️ Export Data & Templates")
     st.markdown("Download current datasets or templates. Upload CSV to replace dataset (must match template columns).")
-    # Exports
     e1, e2, e3 = st.columns(3)
     with e1:
         st.download_button("Download purchases.csv", read_table("purchases").to_csv(index=False).encode("utf-8"), "purchases.csv")
@@ -994,10 +1024,8 @@ elif main_section == "⬇️ Data":
         try:
             new_df = pd.read_csv(up)
             expected = DEFAULTS[which_map[which_choice]].columns.tolist()
-            # permit case-insensitive mapping: try to align columns if possible
             if list(new_df.columns) != expected:
-                st.warning(f"Uploaded headers differ from template. Attempting to align by case-insensitive match...")
-                # attempt align by normalized headers
+                st.warning(f"Uploaded headers differ from template. Attempting case-insensitive align...")
                 mapping = {}
                 lower_expected = {c.lower(): c for c in expected}
                 for col in new_df.columns:
@@ -1005,16 +1033,16 @@ elif main_section == "⬇️ Data":
                         mapping[col] = lower_expected[col.lower()]
                 new_df = new_df.rename(columns=mapping)
             if list(new_df.columns) != expected:
-                st.error(f"Invalid columns. Expected headers: {expected}. Uploaded: {list(new_df.columns)}")
+                st.error(f"Invalid columns. Expected: {expected}. Uploaded: {list(new_df.columns)}")
             else:
-                # overwrite table: delete all and insert new rows
                 overwrite_table(which_map[which_choice], new_df)
+                if which_choice in ("purchases","created_kits","defective","kits_bom"):
+                    recompute_master_snapshot_and_save()
                 st.success(f"Replaced {which_choice} with uploaded CSV ({len(new_df)} rows).")
         except Exception as e:
             st.error(f"Failed to import: {e}")
     st.markdown("---")
     st.subheader("Admin: Manage Data (view / delete rows)")
-    # fetch tables
     try:
         insp = inspect(engine)
         all_tables = insp.get_table_names(schema="public")
@@ -1032,7 +1060,6 @@ elif main_section == "⬇️ Data":
             st.dataframe(df_view.head(200))
             pk = get_primary_key_column(sel_table)
             st.write(f"Detected primary key: **{pk}**")
-            # present selection options (stringified)
             options = df_view[pk].astype(str).tolist()
             to_delete = st.multiselect("Select rows (by PK) to delete", options=options)
             if to_delete:
