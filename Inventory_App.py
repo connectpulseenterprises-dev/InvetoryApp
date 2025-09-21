@@ -252,12 +252,12 @@ def normalize_purchases_df(df: pd.DataFrame) -> pd.DataFrame:
         try:
             if ppp is None or (pd.notna(ppp) and float(ppp) == 0):
                 if row["qty_per_pack"] > 0:
-                    return round(float(row["cost_per_pack"]) / float(row["qty_per_pack"]), 6)
+                    return round(float(row["cost_per_pack"]) / float(row["packs"] * row["qty_per_pack"]), 6)
                 return 0.0
             return float(ppp)
         except Exception:
             if row["qty_per_pack"] > 0:
-                return round(float(row["cost_per_pack"]) / float(row["qty_per_pack"]), 6)
+                return round(float(row["cost_per_pack"]) / float(row["packs"] * row["qty_per_pack"]), 6)
             return 0.0
     w["price_per_piece"] = w.apply(compute_ppp, axis=1)
     # normalize date strings
@@ -643,7 +643,7 @@ elif main_section == "📦 Inventory Management":
                 qty_per_pack = st.number_input("Qty per Pack", min_value=0, step=1, value=0)
                 cost_per_pack = st.number_input("Cost per Pack (₹)", min_value=0.0, step=0.01, value=0.0)
             pieces = int(packs * qty_per_pack)
-            price_per_piece = float((cost_per_pack / qty_per_pack) if qty_per_pack > 0 else 0.0)
+            price_per_piece = float((cost_per_pack / (packs * qty_per_pack)) if qty_per_pack > 0 else 0.0)
             st.markdown(f"**Pieces (computed):** {pieces} — **Price per piece:** ₹{price_per_piece:.4f}")
             if st.button("Add Purchase (update existing material)"):
                 if not selected:
@@ -676,7 +676,7 @@ elif main_section == "📦 Inventory Management":
                 qty_per_pack = st.number_input("Qty per Pack", min_value=0, step=1, value=0)
                 cost_per_pack = st.number_input("Cost per Pack (₹)", min_value=0.0, step=0.01, value=0.0)
             pieces = int(packs * qty_per_pack)
-            price_per_piece = float((cost_per_pack / qty_per_pack) if qty_per_pack > 0 else 0.0)
+            price_per_piece = float((cost_per_pack / ((packs * qty_per_pack)) if qty_per_pack > 0 else 0.0)
             st.markdown(f"**Pieces (computed):** {pieces} — **Price per piece:** ₹{price_per_piece:.4f}")
             if st.button("Add Purchase (new material)"):
                 if not new_id:
