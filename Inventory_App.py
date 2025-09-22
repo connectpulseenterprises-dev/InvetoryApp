@@ -845,6 +845,7 @@ elif main_section == "🧩 Kits Management":
             if not kit_id_input or not kit_name_input or not material_id or qty_per <= 0:
                 st.error("Provide Kit ID, Kit Name, Material, and qty > 0.")
             else:
+                master_snapshot = read_table("master")
                 ms_snapshot = master_snapshot if (master_snapshot is not None and not master_snapshot.empty) else DEFAULTS["master"]
                 row = {
                     "kit_id": kit_id_input.strip(),
