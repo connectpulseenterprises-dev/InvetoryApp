@@ -277,6 +277,72 @@ def normalize_purchases_df(df: pd.DataFrame) -> pd.DataFrame:
     return w[final_cols]
 
 # ---------------- Write helpers ----------------
+def get_material_name(snapshot: pd.DataFrame, material_id: str) -> str:
+    """
+    Return the material name for a material_id from a snapshot DataFrame.
+    Handles common column-name variants and returns empty string if not found.
+    """
+    try:
+        if snapshot is None or snapshot.empty or not material_id:
+            return ""
+        mid = str(material_id)
+
+        # Prefer lowercase DB-style columns if present
+        if "id" in snapshot.columns:
+            mask = snapshot["id"].astype(str) == mid
+            if mask.any():
+                # Prefer 'name' column
+                if "name" in snapshot.columns:
+                    val = snapshot.loc[mask, "name"].iat[0]
+                    return str(val) if pd.notna(val) else ""
+                # Try material_name
+                if "material_name" in snapshot.columns:
+                    val = snapshot.loc[mask, "material_name"].iat[0]
+                    return str(val) if pd.notna(val) else ""
+
+        # Try common TitleCase / original-case columns
+        if "ID" in snapshot.columns:
+            mask = snapshot["ID"].astype(str) == mid
+            if mask.any():
+                if "Name" in snapshot.columns:
+                    val = snapshot.loc[mask, "Name"].iat[0]
+                    return str(val) if pd.notna(val) else ""
+                if "Material Name" in snapshot.columns:
+                    val = snapshot.loc[mask, "Material Name"].iat[0]
+                    return str(val) if pd.notna(val) else ""
+
+        # Generic search: find row where any column named like 'id' matches
+        for col in snapshot.columns:
+            if col.lower() == "id":
+                mask = snapshot[col].astype(str) == mid
+                if mask.any():
+                    # look for any name-ish column
+                    for nm_col in ("name", "Name", "material_name", "Material Name"):
+                        if nm_col in snapshot.columns:
+                            val = snapshot.loc[mask, nm_col].iat[0]
+                            if pd.notna(val) and str(val).strip() != "":
+                                return str(val)
+                    # fallback: return first non-id textual column value
+                    for c in snapshot.columns:
+                        if c.lower() != "id":
+                            val = snapshot.loc[mask, c].iat[0]
+                            if pd.notna(val) and str(val).strip() != "":
+                                return str(val)
+        # Last-resort: try matching against any column that looks like id (e.g., material_id)
+        for col in snapshot.columns:
+            if "material" in col.lower() and "id" in col.lower():
+                mask = snapshot[col].astype(str) == mid
+                if mask.any():
+                    for nm_col in ("material_name", "Material Name", "name", "Name"):
+                        if nm_col in snapshot.columns:
+                            val = snapshot.loc[mask, nm_col].iat[0]
+                            if pd.notna(val):
+                                return str(val)
+        return ""
+    except Exception:
+        return ""
+
+
 def write_rows(name: str, df: pd.DataFrame):
     if df is None or df.empty:
         return
@@ -779,11 +845,12 @@ elif main_section == "🧩 Kits Management":
             if not kit_id_input or not kit_name_input or not material_id or qty_per <= 0:
                 st.error("Provide Kit ID, Kit Name, Material, and qty > 0.")
             else:
+                ms_snapshot = master_snapshot if (master_snapshot is not None and not master_snapshot.empty) else DEFAULTS["master"]
                 row = {
                     "kit_id": kit_id_input.strip(),
                     "kit_name": kit_name_input.strip(),
                     "material_id": material_id,
-                    "material_name": get_material_name(master_snapshot if not master_snapshot.empty else DEFAULTS["master"], material_id),
+                    "material_name": get_material_name(ms_snapshot, material_id),
                     "qty_per_kit": qty_per,
                     "unit_price_ref": float(unit_override) if unit_override > 0 else None,
                     "amazon_id": amazon_id.strip() if amazon_id else None,
